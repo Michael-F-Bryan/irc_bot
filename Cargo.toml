@@ -1,0 +1,16 @@
+[package]
+name = "irc_bot"
+version = "0.1.0"
+authors = ["Michael Bryan <michaelfbryan@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+actix = "0.7.5"
+irc = "0.13.6"
+failure = "0.1.3"
+slog = "2.4.1"
+futures = "0.1"
+slog-async = "2.3.0"
+slog-term = "2.4.0"
+tokio = "0.1"
+tokio-core = "0.1.17"
