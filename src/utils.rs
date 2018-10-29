@@ -1,6 +1,6 @@
 use actix::dev::ToEnvelope;
 use actix::{Actor, Addr, Handler, Message, Recipient};
-use anymap::AnyMap;
+use anymap::Map;
 use failure::Backtrace;
 use futures::stream::{self, Stream};
 use std::any::Any;
@@ -86,12 +86,12 @@ impl<'a> From<&'a PanicInfo<'a>> for Panic {
 
 #[derive(Debug)]
 pub struct MessageBox {
-    map: AnyMap,
+    map: Map<anymap::any::Any + Send>,
 }
 
 impl MessageBox {
     pub fn new() -> MessageBox {
-        MessageBox { map: AnyMap::new() }
+        MessageBox { map: Map::new() }
     }
 
     pub fn register<M>(&mut self, recipient: Recipient<M>)

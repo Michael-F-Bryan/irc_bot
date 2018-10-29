@@ -1,10 +1,13 @@
 #[macro_use]
 extern crate slog;
 
-use actix::{Actor, Arbiter, Context, Handler, System};
+use actix::{Actor, Addr, Arbiter, Context, Handler, System};
 use failure::Error;
+use futures::Future;
 use irc::client::prelude::Config as IrcConfig;
-use irc_bot::client::{Client, Connected};
+use irc_bot::client::{
+    Client, Connected, Identify, Join, PrivateMessage, Registration,
+};
 use irc_bot::logging::{Logger, Oops};
 use irc_bot::{self, PanicHook};
 use slog::Drain;
@@ -68,15 +71,31 @@ fn initialize_logging() -> slog::Logger {
 
 /// Do some stuff immediately after creating the client so we can hook into the
 /// IRC actor system.
-fn register_bot(client: &mut Client) {
-    let bot = Bot.start();
+fn register_bot(
+    client: &Addr<Client>,
+    error_logger: &Addr<Logger>,
+    registration: &mut Registration,
+) {
+    let bot = Bot::new(client.clone(), error_logger.clone()).start();
     let recipient = bot.recipient();
 
-    client.register::<Connected>(recipient.clone());
+    registration.register::<Connected>(recipient.clone());
 }
 
-#[derive(Debug, Clone)]
-struct Bot;
+#[derive(Clone)]
+struct Bot {
+    client: Addr<Client>,
+    error_logger: Addr<Logger>,
+}
+
+impl Bot {
+    pub fn new(client: Addr<Client>, error_logger: Addr<Logger>) -> Bot {
+        Bot {
+            client,
+            error_logger,
+        }
+    }
+}
 
 impl Actor for Bot {
     type Context = Context<Bot>;
@@ -85,7 +104,30 @@ impl Actor for Bot {
 impl Handler<Connected> for Bot {
     type Result = ();
 
-    fn handle(&mut self, msg: Connected, _ctx: &mut Self::Context) {
-        unimplemented!();
+    fn handle(&mut self, _msg: Connected, _ctx: &mut Self::Context) {
+        println!("Connected!");
+
+        let err = self.error_logger.clone();
+
+        let fut = self.client.send(Identify);
+
+        let client = self.client.clone();
+        let fut = fut.and_then(move |_| {
+            client.send(PrivateMessage {
+                to: String::from("nickserv"),
+                content: String::from(":identify p9UG5eTbQ5kJp4Gq"),
+            })
+        });
+
+        let client = self.client.clone();
+        let fut = fut
+            .and_then(move |_| {
+                client.send(Join {
+                    channels: String::from("#rust-bots"),
+                })
+            })
+            .map_err(move |e| err.do_send(Oops::new(e)));
+
+        Arbiter::spawn(fut);
     }
 }

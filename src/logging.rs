@@ -3,6 +3,7 @@ use crate::utils::Panic;
 use failure::Error;
 
 /// An actor in charge of receiving log messages.
+#[derive(Debug)]
 pub struct Logger {
     inner: slog::Logger,
 }
@@ -51,7 +52,7 @@ impl Handler<Oops> for Logger {
     fn handle(&mut self, msg: Oops, _ctx: &mut Context<Logger>) {
         error!(self.inner, "{}", msg.error.to_string(); 
             "fatal" => msg.fatal,
-            "backtrace" => &format_args!("{}", msg.error.backtrace()));
+            "backtrace" => format_args!("{}", msg.error.backtrace()));
 
         if msg.fatal {
             info!(self.inner, "Aborting the application");
