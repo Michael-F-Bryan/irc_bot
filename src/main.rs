@@ -1,9 +1,10 @@
 #[macro_use]
 extern crate slog;
 
-use actix::{Actor, System};
+use actix::{Actor, Arbiter, Context, Handler, System};
 use failure::Error;
 use irc::client::prelude::Config as IrcConfig;
+use irc_bot::client::{Client, Connected};
 use irc_bot::logging::{Logger, Oops};
 use irc_bot::{self, PanicHook};
 use slog::Drain;
@@ -18,16 +19,21 @@ fn run(logger: &slog::Logger) -> Result<(), Error> {
     };
 
     let logger = logger.clone();
-    System::run(move || {
-        let error_logger = Logger::from(logger.clone()).start();
-        let _panic = PanicHook::new(error_logger.clone());
+    let sys = System::new("irc-bot");
 
-        if let Err(e) =
-            irc_bot::spawn_client(logger, error_logger.clone(), irc_config)
-        {
-            error_logger.do_send(Oops::fatal(e));
-        }
-    });
+    let error_logger = Logger::from(logger.clone()).start();
+    let _panic = PanicHook::new(error_logger.clone());
+
+    if let Err(e) = irc_bot::spawn_client(
+        logger,
+        error_logger.clone(),
+        register_bot,
+        irc_config,
+    ) {
+        error_logger.do_send(Oops::fatal(e));
+    }
+
+    sys.run();
 
     Ok(())
 }
@@ -58,4 +64,28 @@ fn initialize_logging() -> slog::Logger {
     let drain = slog_async::Async::new(drain).build().fuse();
 
     slog::Logger::root(drain, o!())
+}
+
+/// Do some stuff immediately after creating the client so we can hook into the
+/// IRC actor system.
+fn register_bot(client: &mut Client) {
+    let bot = Bot.start();
+    let recipient = bot.recipient();
+
+    client.register::<Connected>(recipient.clone());
+}
+
+#[derive(Debug, Clone)]
+struct Bot;
+
+impl Actor for Bot {
+    type Context = Context<Bot>;
+}
+
+impl Handler<Connected> for Bot {
+    type Result = ();
+
+    fn handle(&mut self, msg: Connected, _ctx: &mut Self::Context) {
+        unimplemented!();
+    }
 }

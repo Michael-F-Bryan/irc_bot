@@ -3,6 +3,7 @@ use actix::{Actor, Addr, Handler, Message, Recipient};
 use anymap::AnyMap;
 use failure::Backtrace;
 use futures::stream::{self, Stream};
+use std::any::Any;
 use std::panic::{self, PanicInfo};
 use std::thread;
 
@@ -47,19 +48,22 @@ pub struct Panic {
     pub backtrace: Backtrace,
 }
 
+pub(crate) fn panic_message(payload: &(dyn Any + Send + 'static)) -> String {
+    if let Some(msg) = payload.downcast_ref::<&str>() {
+        msg.to_string()
+    } else if let Some(msg) = payload.downcast_ref::<String>() {
+        msg.clone()
+    } else {
+        String::from("Panic")
+    }
+}
+
 impl<'a> From<&'a PanicInfo<'a>> for Panic {
     fn from(other: &'a PanicInfo) -> Panic {
         let backtrace = Backtrace::new();
         let thread = thread::current().name().map(String::from);
 
-        let message = if let Some(msg) = other.payload().downcast_ref::<&str>()
-        {
-            msg.to_string()
-        } else if let Some(msg) = other.payload().downcast_ref::<String>() {
-            msg.clone()
-        } else {
-            String::from("Panic")
-        };
+        let message = panic_message(other.payload());
 
         match other.location() {
             Some(loc) => Panic {
