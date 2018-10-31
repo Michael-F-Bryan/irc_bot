@@ -8,7 +8,9 @@ mod channel;
 pub mod client;
 pub mod logging;
 mod utils;
+mod world;
 
 pub use crate::bot::Bot;
 pub use crate::client::spawn_client;
 pub use crate::utils::PanicHook;
+pub use crate::world::World;
