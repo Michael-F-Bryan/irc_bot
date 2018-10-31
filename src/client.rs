@@ -1,6 +1,8 @@
 use actix::{
-    Actor, Addr, Arbiter, Context, Handler, Message, Recipient, System,
+    Actor, Addr, Arbiter, AsyncContext, Context, Handler, Message, Recipient,
+    System,
 };
+use crate::channel::Channel;
 use crate::logging::{Logger, Oops};
 use crate::utils::MessageBox;
 use failure::{Error, Fail};
@@ -9,6 +11,8 @@ use irc::client::prelude::{
     Client as _Client, ClientExt, Config, Future, IrcClient, Stream,
 };
 use irc::client::ClientStream;
+use irc::proto::{Command, Response};
+use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
 
 /// A marker trait for all [`Message`] types which a bot can try to receive.
@@ -22,6 +26,7 @@ pub struct Client {
     error_logger: Addr<Logger>,
     message_box: MessageBox,
     msg_count: usize,
+    channels: HashMap<String, Addr<Channel>>,
 }
 
 /// Creates a new IRC client actor, making sure it will get sent any incoming
@@ -77,6 +82,7 @@ impl Client {
             logger,
             message_box: MessageBox::new(),
             msg_count: 0,
+            channels: HashMap::default(),
         })
     }
 
@@ -122,8 +128,6 @@ impl Handler<RawMessage> for Client {
         debug!(self.logger, "Received a message";
             "prefix" => msg.0.prefix.as_ref(),
             "command" => format_args!("{:?}", msg.0.command));
-        trace!(self.logger, "Full message"; 
-            "message" => format_args!("{}", msg.0));
 
         if self.msg_count == 0 {
             debug!(self.logger, "Notifying subscribers that we've connected");
@@ -131,9 +135,31 @@ impl Handler<RawMessage> for Client {
         }
 
         self.msg_count += 1;
+
+        if let Command::Response(
+            Response::ERR_NOTREGISTERED,
+            ref args,
+            ref suffix,
+        ) = msg.0.command
+        {
+            ctx.notify(NotifyBot(NotRegistered {
+                args: args.clone(),
+                suffix: suffix.clone(),
+            }));
+        }
+
         self.handle(NotifyBot(msg), ctx);
     }
 }
+
+/// The server sent a *NOT REGISTERED* message.
+#[derive(Debug, Clone, PartialEq, Message)]
+pub struct NotRegistered {
+    pub args: Vec<String>,
+    pub suffix: Option<String>,
+}
+
+impl BotMessage for NotRegistered {}
 
 /// A raw message as received from the IRC server.
 #[derive(Debug, Clone, Message)]

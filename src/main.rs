@@ -1,23 +1,20 @@
 #[macro_use]
 extern crate slog;
 
-use actix::{Actor, Addr, Arbiter, Context, Handler, System};
+use actix::{Actor, System};
 use failure::Error;
-use futures::Future;
 use irc::client::prelude::Config as IrcConfig;
-use irc_bot::client::{
-    Client, Connected, Identify, Join, PrivateMessage, Registration,
-};
 use irc_bot::logging::{Logger, Oops};
-use irc_bot::{self, PanicHook};
+use irc_bot::Bot;
+use irc_bot::PanicHook;
 use slog::Drain;
 use std::process;
 
 fn run(logger: &slog::Logger) -> Result<(), Error> {
     let irc_config = IrcConfig {
-        nickname: Some("test-bot".to_owned()),
+        nickname: Some("Michael-F-Bryan".to_owned()),
         server: Some("irc.mozilla.org".to_owned()),
-        channels: Some(vec![String::from("#rust-bots")]),
+        channels: Some(vec![String::from("#rust-beginners")]),
         ..Default::default()
     };
 
@@ -28,17 +25,21 @@ fn run(logger: &slog::Logger) -> Result<(), Error> {
     let _panic = PanicHook::new(error_logger.clone());
 
     if let Err(e) = irc_bot::spawn_client(
-        logger,
+        logger.clone(),
         error_logger.clone(),
-        register_bot,
+        |a, b, c| Bot::register(logger.clone(), a, b, c),
         irc_config,
     ) {
         error_logger.do_send(Oops::fatal(e));
     }
 
-    sys.run();
-
-    Ok(())
+    if sys.run() == 0 {
+        Ok(())
+    } else {
+        Err(failure::err_msg(
+            "The system exited with a non-zero error code",
+        ))
+    }
 }
 
 fn main() {
@@ -67,67 +68,4 @@ fn initialize_logging() -> slog::Logger {
     let drain = slog_async::Async::new(drain).build().fuse();
 
     slog::Logger::root(drain, o!())
-}
-
-/// Do some stuff immediately after creating the client so we can hook into the
-/// IRC actor system.
-fn register_bot(
-    client: &Addr<Client>,
-    error_logger: &Addr<Logger>,
-    registration: &mut Registration,
-) {
-    let bot = Bot::new(client.clone(), error_logger.clone()).start();
-    let recipient = bot.recipient();
-
-    registration.register::<Connected>(recipient.clone());
-}
-
-#[derive(Clone)]
-struct Bot {
-    client: Addr<Client>,
-    error_logger: Addr<Logger>,
-}
-
-impl Bot {
-    pub fn new(client: Addr<Client>, error_logger: Addr<Logger>) -> Bot {
-        Bot {
-            client,
-            error_logger,
-        }
-    }
-}
-
-impl Actor for Bot {
-    type Context = Context<Bot>;
-}
-
-impl Handler<Connected> for Bot {
-    type Result = ();
-
-    fn handle(&mut self, _msg: Connected, _ctx: &mut Self::Context) {
-        println!("Connected!");
-
-        let err = self.error_logger.clone();
-
-        let fut = self.client.send(Identify);
-
-        let client = self.client.clone();
-        let fut = fut.and_then(move |_| {
-            client.send(PrivateMessage {
-                to: String::from("nickserv"),
-                content: String::from(":identify p9UG5eTbQ5kJp4Gq"),
-            })
-        });
-
-        let client = self.client.clone();
-        let fut = fut
-            .and_then(move |_| {
-                client.send(Join {
-                    channels: String::from("#rust-bots"),
-                })
-            })
-            .map_err(move |e| err.do_send(Oops::new(e)));
-
-        Arbiter::spawn(fut);
-    }
 }

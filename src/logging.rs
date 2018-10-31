@@ -1,4 +1,4 @@
-use actix::{Actor, Context, Handler, System};
+use actix::{Actor, Arbiter, Context, Handler, System};
 use crate::utils::Panic;
 use failure::Error;
 
