@@ -11,16 +11,29 @@ use slog::Logger;
 pub struct Bot<C: Client + 'static> {
     logger: Logger,
     world: Addr<World<C>>,
+    identify_password: String,
 }
 
 impl<C: Client + 'static> Bot<C> {
-    fn new(logger: Logger, world: Addr<World<C>>) -> Bot<C> {
-        Bot { logger, world }
+    fn new(
+        logger: Logger,
+        world: Addr<World<C>>,
+        identify_password: String,
+    ) -> Bot<C> {
+        Bot {
+            logger,
+            world,
+            identify_password,
+        }
     }
 
     /// Soawn a [`Bot`] actor in the background.
-    pub fn spawn(logger: Logger, world: &Addr<World<C>>) -> Addr<Bot<C>> {
-        let bot = Bot::new(logger, world.clone());
+    pub fn spawn(
+        logger: Logger,
+        world: &Addr<World<C>>,
+        identify_password: String,
+    ) -> Addr<Bot<C>> {
+        let bot = Bot::new(logger, world.clone(), identify_password);
         let bot = bot.start();
 
         world.do_send(Registration::<Connected>::register(
@@ -39,17 +52,18 @@ impl<C: Client + 'static> Handler<Connected> for Bot<C> {
     type Result = ();
 
     fn handle(&mut self, _msg: Connected, _ctx: &mut Self::Context) {
-        info!(self.logger, "Connected!");
+        info!(self.logger, "Connected to server");
 
         let world = self.world.clone();
         let logger = self.logger.clone();
+        let identify_password = self.identify_password.clone();
 
         let fut = lift_err(self.world.send(Identify));
         let fut = lift_err(fut.and_then(move |_| {
             world
                 .send(PrivateMessage {
                     to: String::from("NickServ"),
-                    content: String::from("IDENTIFY p9UG5eTbQ5kJp4Gq"),
+                    content: format!("IDENTIFY {}", identify_password),
                 })
                 .map_err(Error::from)
         }));
@@ -57,7 +71,6 @@ impl<C: Client + 'static> Handler<Connected> for Bot<C> {
         Arbiter::spawn(fut.map_err(move |e: Error| {
             error!(logger, "Unable to identify"; "error" => e.to_string());
             Arbiter::current().do_send(StopArbiter(1));
-            ()
         }));
     }
 }

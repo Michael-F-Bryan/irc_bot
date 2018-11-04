@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::panic::PanicInfo;
 use std::thread;
 
+/// A raw, unprocessed IRC message.
 #[derive(Debug, Clone, PartialEq, Message)]
 pub struct RawMessage(pub IrcMessage);
 
@@ -46,6 +47,7 @@ impl Message for PrivateMessage {
     type Result = Result<(), IrcError>;
 }
 
+/// Attempt to join a channel.
 #[derive(Debug, Clone)]
 pub struct Join {
     pub channels: String,
@@ -124,6 +126,7 @@ where
     }
 }
 
+/// A panic has occurred.
 #[derive(Debug, Default, Message)]
 pub struct Panic {
     pub message: String,
