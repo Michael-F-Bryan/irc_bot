@@ -2,7 +2,8 @@ use actix::msgs::StopArbiter;
 use actix::{Actor, Addr, Arbiter, Context, Handler};
 use crate::messages::{Connected, Identify, PrivateMessage, Registration};
 use crate::World;
-use futures::Future;
+use failure::Error;
+use futures::future::{self, Future};
 use irc::client::Client;
 use slog::Logger;
 
@@ -43,21 +44,30 @@ impl<C: Client + 'static> Handler<Connected> for Bot<C> {
         let world = self.world.clone();
         let logger = self.logger.clone();
 
-        let fut = self
-            .world
-            .send(Identify)
-            .and_then(move |_| {
-                world.send(PrivateMessage {
+        let fut = lift_err(self.world.send(Identify));
+        let fut = lift_err(fut.and_then(move |_| {
+            world
+                .send(PrivateMessage {
                     to: String::from("NickServ"),
                     content: String::from("IDENTIFY p9UG5eTbQ5kJp4Gq"),
                 })
-            })
-            .map_err(move |e| {
-                error!(logger, "Unable to identify"; "error" => e.to_string());
-                Arbiter::current().do_send(StopArbiter(1));
-                ()
-            });
+                .map_err(Error::from)
+        }));
 
-        Arbiter::spawn(fut);
+        Arbiter::spawn(fut.map_err(move |e: Error| {
+            error!(logger, "Unable to identify"; "error" => e.to_string());
+            Arbiter::current().do_send(StopArbiter(1));
+            ()
+        }));
     }
+}
+
+/// Convert a future which returns a result into a future which will error when
+/// the inner result errors.
+fn lift_err<T, E>(
+    fut: impl Future<Item = Result<T, impl Into<E>>, Error = impl Into<E>>,
+) -> impl Future<Item = T, Error = E> {
+    fut.map_err(Into::into)
+        .then(|item| item.map(|inner| inner.map_err(Into::into)))
+        .flatten()
 }

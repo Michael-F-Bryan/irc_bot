@@ -6,8 +6,8 @@ use actix::{
 };
 use crate::channel::Channel;
 use crate::messages::{
-    Connected, Identify, Join, NotRegistered, Panic, PrivateMessage, Quit,
-    RawMessage, Registration, StartListening,
+    Connected, Identify, Join, NotRegistered, Panic, PrivateMessage,
+    PrivateMessageReceived, Quit, RawMessage, Registration, StartListening,
 };
 use crate::utils::MessageBox;
 use irc::client::prelude::{Client, ClientExt};
@@ -95,6 +95,7 @@ impl<C: 'static> Handler<RawMessage> for World<C> {
     fn handle(&mut self, msg: RawMessage, _ctx: &mut Self::Context) {
         debug!(self.logger, "Received a message";
             "prefix" => msg.0.prefix.as_ref(),
+            "source-nick" => msg.0.source_nickname(),
             "command" => format_args!("{:?}", msg.0.command));
 
         if self.message_count == 0 {
@@ -103,16 +104,25 @@ impl<C: 'static> Handler<RawMessage> for World<C> {
         }
         self.message_count += 1;
 
-        if let Command::Response(
-            Response::ERR_NOTREGISTERED,
-            ref args,
-            ref suffix,
-        ) = msg.0.command
-        {
-            self.publish(NotRegistered {
-                args: args.clone(),
-                suffix: suffix.clone(),
-            });
+        match msg.0.command {
+            Command::Response(
+                Response::ERR_NOTREGISTERED,
+                ref args,
+                ref suffix,
+            ) => {
+                self.publish(NotRegistered {
+                    args: args.clone(),
+                    suffix: suffix.clone(),
+                });
+            }
+            Command::PRIVMSG(ref target, ref message) => {
+                self.publish(PrivateMessageReceived {
+                    msg_target: target.clone(),
+                    content: message.clone(),
+                    raw: msg.0.clone(),
+                })
+            }
+            _ => {}
         }
 
         self.publish(msg);
@@ -134,42 +144,54 @@ impl<C: Client + 'static> Handler<Quit> for World<C> {
 }
 
 impl<C: Client + 'static> Handler<PrivateMessage> for World<C> {
-    type Result = ();
+    type Result = Result<(), IrcError>;
 
-    fn handle(&mut self, msg: PrivateMessage, _ctx: &mut Self::Context) {
+    fn handle(
+        &mut self,
+        msg: PrivateMessage,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
         debug!(self.logger, "Sending a private message";
             "recipient" => &msg.to,
             "content" => &msg.content);
 
-        if let Err(e) = self.client.send_privmsg(msg.to, msg.content) {
+        let got = self.client.send_privmsg(msg.to, msg.content);
+
+        if let Err(ref e) = got {
             error!(self.logger, "Unable to send a private message";
                 "error" => e.to_string());
         }
+
+        got
     }
 }
 
 impl<C: Client + 'static> Handler<Join> for World<C> {
-    type Result = ();
+    type Result = Result<(), IrcError>;
 
-    fn handle(&mut self, msg: Join, _ctx: &mut Self::Context) {
-        if let Err(e) = self.client.send_join(&msg.channels) {
-            error!(self.logger, "Unable to join";
-                "error" => e.to_string(),
-                "channels" => msg.channels);
-        }
+    fn handle(&mut self, msg: Join, _ctx: &mut Self::Context) -> Self::Result {
+        self.client.send_join(&msg.channels)
     }
 }
 
 impl<C: Client + 'static> Handler<Identify> for World<C> {
-    type Result = ();
+    type Result = Result<(), IrcError>;
 
-    fn handle(&mut self, _msg: Identify, _ctx: &mut Self::Context) {
+    fn handle(
+        &mut self,
+        _msg: Identify,
+        _ctx: &mut Self::Context,
+    ) -> Self::Result {
         info!(self.logger, "Sending identification");
 
-        if let Err(e) = self.client.identify() {
+        let got = self.client.identify();
+
+        if let Err(ref e) = got {
             error!(self.logger, "Unable to identify";
                 "error" => e.to_string());
         }
+
+        got
     }
 }
 

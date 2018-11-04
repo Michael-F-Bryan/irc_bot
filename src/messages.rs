@@ -1,9 +1,12 @@
 use actix::dev::ToEnvelope;
 use actix::{Actor, Addr, Handler, Message, Recipient};
+use crate::channel::Channel;
 use crate::utils::MessageBox;
 use failure::Backtrace;
+use irc::error::IrcError;
 use irc::proto::message::Message as IrcMessage;
 use std::any::Any;
+use std::collections::HashMap;
 use std::panic::PanicInfo;
 use std::thread;
 
@@ -32,19 +35,34 @@ impl Default for Quit {
 #[derive(Debug, Clone, Message)]
 pub struct Connected;
 
-#[derive(Debug, Clone, Message)]
+/// Send a private message.
+#[derive(Debug, Clone)]
 pub struct PrivateMessage {
     pub to: String,
     pub content: String,
 }
 
-#[derive(Debug, Clone, Message)]
+impl Message for PrivateMessage {
+    type Result = Result<(), IrcError>;
+}
+
+#[derive(Debug, Clone)]
 pub struct Join {
     pub channels: String,
 }
 
-#[derive(Debug, Clone, Message)]
+impl Message for Join {
+    type Result = Result<(), IrcError>;
+}
+
+/// Identify the IRC client with the server, typically by sending a nick and
+/// username.
+#[derive(Debug, Clone)]
 pub struct Identify;
+
+impl Message for Identify {
+    type Result = Result<(), IrcError>;
+}
 
 /// The server sent a *NOT REGISTERED* message.
 #[derive(Debug, Clone, PartialEq, Message)]
@@ -156,7 +174,22 @@ impl<'a> From<&'a PanicInfo<'a>> for Panic {
 ///
 /// # Panic
 ///
-/// This message can only be sent once. Telling the [`World`] to
+/// This message can only be sent once. Telling the [`irc_bot::World`] to
 /// [`StartListening`] multiple times will probably result in a panic.
 #[derive(Debug, Copy, Clone, Message)]
 pub struct StartListening;
+
+/// Ask what channels we are currently listening to.
+#[derive(Debug, Copy, Clone)]
+pub struct Channels;
+
+impl Message for Channels {
+    type Result = HashMap<String, Addr<Channel>>;
+}
+
+#[derive(Debug, Clone, PartialEq, Message)]
+pub struct PrivateMessageReceived {
+    pub msg_target: String,
+    pub content: String,
+    pub raw: IrcMessage,
+}

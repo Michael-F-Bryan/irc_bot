@@ -16,7 +16,10 @@ fn run(logger: &slog::Logger) -> Result<(), Error> {
     let irc_config = IrcConfig {
         nickname: Some("Michael-F-Bryan".to_owned()),
         server: Some("irc.mozilla.org".to_owned()),
-        channels: Some(vec![String::from("#rust-beginners")]),
+        channels: Some(vec![
+            String::from("#rust-beginners"),
+            String::from("#rust-bots"),
+        ]),
         ..Default::default()
     };
 
