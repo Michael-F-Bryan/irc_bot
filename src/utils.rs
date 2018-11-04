@@ -1,11 +1,9 @@
 use actix::dev::ToEnvelope;
 use actix::{Actor, Addr, Handler, Message, Recipient};
 use anymap::Map;
-use failure::Backtrace;
+use crate::messages::Panic;
 use futures::stream::{self, Stream};
-use std::any::Any;
 use std::panic::{self, PanicInfo};
-use std::thread;
 
 /// A RAII guard which will forward any panics to some actor which can accept
 /// the [`Panic`] message.
@@ -35,52 +33,6 @@ impl Drop for PanicHook {
         let previous_handler = self.previous_handler.take().unwrap();
         let _ = panic::take_hook();
         panic::set_hook(previous_handler);
-    }
-}
-
-#[derive(Debug, Default, Message)]
-pub struct Panic {
-    pub message: String,
-    pub file: String,
-    pub line: u32,
-    pub column: u32,
-    pub thread: Option<String>,
-    pub backtrace: Backtrace,
-}
-
-pub(crate) fn panic_message(payload: &(dyn Any + Send + 'static)) -> String {
-    if let Some(msg) = payload.downcast_ref::<&str>() {
-        msg.to_string()
-    } else if let Some(msg) = payload.downcast_ref::<String>() {
-        msg.clone()
-    } else {
-        String::from("Panic")
-    }
-}
-
-impl<'a> From<&'a PanicInfo<'a>> for Panic {
-    fn from(other: &'a PanicInfo) -> Panic {
-        let backtrace = Backtrace::new();
-        let thread = thread::current().name().map(String::from);
-
-        let message = panic_message(other.payload());
-
-        match other.location() {
-            Some(loc) => Panic {
-                message,
-                file: loc.file().to_string(),
-                line: loc.line(),
-                column: loc.column(),
-                thread,
-                backtrace,
-            },
-            None => Panic {
-                message,
-                backtrace,
-                thread,
-                ..Default::default()
-            },
-        }
     }
 }
 

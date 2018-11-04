@@ -1,90 +1,62 @@
+use actix::msgs::StopArbiter;
 use actix::{Actor, Addr, Arbiter, Context, Handler};
-use crate::client::{
-    Client, Connected, Identify, Join, NotRegistered, PrivateMessage,
-    Registration,
-};
-use crate::logging::{Logger, Oops};
+use crate::messages::{Connected, Identify, PrivateMessage, Registration};
+use crate::World;
 use futures::Future;
+use irc::client::Client;
+use slog::Logger;
 
 #[derive(Clone)]
-pub struct Bot {
-    logger: slog::Logger,
-    client: Addr<Client>,
-    error_logger: Addr<Logger>,
+pub struct Bot<C: Client + 'static> {
+    logger: Logger,
+    world: Addr<World<C>>,
 }
 
-impl Bot {
-    pub fn new(
-        logger: slog::Logger,
-        client: Addr<Client>,
-        error_logger: Addr<Logger>,
-    ) -> Bot {
-        Bot {
-            logger,
-            client,
-            error_logger,
-        }
+impl<C: Client + 'static> Bot<C> {
+    fn new(logger: Logger, world: Addr<World<C>>) -> Bot<C> {
+        Bot { logger, world }
     }
 
-    /// Do some stuff immediately after creating the client so we can hook into
-    /// the IRC actor system.
-    pub fn register(
-        logger: slog::Logger,
-        client: &Addr<Client>,
-        error_logger: &Addr<Logger>,
-        registration: &mut Registration,
-    ) {
-        let bot = Bot::new(logger, client.clone(), error_logger.clone());
+    /// Soawn a [`Bot`] actor in the background.
+    pub fn spawn(logger: Logger, world: &Addr<World<C>>) -> Addr<Bot<C>> {
+        let bot = Bot::new(logger, world.clone());
         let bot = bot.start();
 
-        registration.register::<Connected>(bot.clone().recipient());
-        registration.register::<NotRegistered>(bot.clone().recipient());
+        world.do_send(Registration::<Connected>::register(
+            bot.clone().recipient(),
+        ));
+
+        bot
     }
 }
 
-impl Actor for Bot {
-    type Context = Context<Bot>;
+impl<C: Client + 'static> Actor for Bot<C> {
+    type Context = Context<Bot<C>>;
 }
 
-impl Handler<Connected> for Bot {
+impl<C: Client + 'static> Handler<Connected> for Bot<C> {
     type Result = ();
 
     fn handle(&mut self, _msg: Connected, _ctx: &mut Self::Context) {
         info!(self.logger, "Connected!");
 
-        let err = self.error_logger.clone();
-        let client = self.client.clone();
+        let world = self.world.clone();
+        let logger = self.logger.clone();
 
         let fut = self
-            .client
+            .world
             .send(Identify)
             .and_then(move |_| {
-                client.send(PrivateMessage {
+                world.send(PrivateMessage {
                     to: String::from("NickServ"),
                     content: String::from("IDENTIFY p9UG5eTbQ5kJp4Gq"),
                 })
             })
-            .map_err(move |e| err.do_send(Oops::new(e)));
-
-        Arbiter::spawn(fut);
-    }
-}
-
-impl Handler<NotRegistered> for Bot {
-    type Result = ();
-
-    fn handle(&mut self, _msg: NotRegistered, _ctx: &mut Self::Context) {
-        info!(self.logger, "Sending registration information");
-
-        let client = self.client.clone();
-        let err = self.error_logger.clone();
-
-        let fut = client
-            .send(PrivateMessage {
-                to: String::from("NickServ"),
-                content: String::from("IDENTIFY p9UG5eTbQ5kJp4Gq"),
-            })
-            .map_err(move |e| err.do_send(Oops::new(e)));
+            .map_err(move |e| {
+                error!(logger, "Unable to identify"; "error" => e.to_string());
+                Arbiter::current().do_send(StopArbiter(1));
+                ()
+            });
 
         Arbiter::spawn(fut);
     }

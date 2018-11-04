@@ -5,12 +5,10 @@ extern crate actix;
 
 mod bot;
 mod channel;
-pub mod client;
-pub mod logging;
+pub mod messages;
 mod utils;
 mod world;
 
 pub use crate::bot::Bot;
-pub use crate::client::spawn_client;
 pub use crate::utils::PanicHook;
 pub use crate::world::World;

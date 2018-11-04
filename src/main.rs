@@ -1,16 +1,18 @@
 #[macro_use]
 extern crate slog;
 
+use actix::actors::signal::{ProcessSignals, Subscribe};
 use actix::{Actor, System};
 use failure::Error;
-use irc::client::prelude::Config as IrcConfig;
-use irc_bot::logging::{Logger, Oops};
-use irc_bot::Bot;
-use irc_bot::PanicHook;
+use irc::client::prelude::{Config as IrcConfig, IrcClient};
+use irc_bot::messages::StartListening;
+use irc_bot::{Bot, PanicHook, World};
 use slog::Drain;
 use std::process;
 
 fn run(logger: &slog::Logger) -> Result<(), Error> {
+    info!(logger, "Starting");
+
     let irc_config = IrcConfig {
         nickname: Some("Michael-F-Bryan".to_owned()),
         server: Some("irc.mozilla.org".to_owned()),
@@ -18,20 +20,23 @@ fn run(logger: &slog::Logger) -> Result<(), Error> {
         ..Default::default()
     };
 
+    let client = IrcClient::from_config(irc_config).unwrap();
     let logger = logger.clone();
+
     let sys = System::new("irc-bot");
+    let world = World::new_with_logger(client, logger.clone()).start();
 
-    let error_logger = Logger::from(logger.clone()).start();
-    let _panic = PanicHook::new(error_logger.clone());
+    // set up signal and panic handling
+    System::current()
+        .registry()
+        .get::<ProcessSignals>()
+        .do_send(Subscribe(world.clone().recipient()));
+    let _panic = PanicHook::new(world.clone());
 
-    if let Err(e) = irc_bot::spawn_client(
-        logger.clone(),
-        error_logger.clone(),
-        |a, b, c| Bot::register(logger.clone(), a, b, c),
-        irc_config,
-    ) {
-        error_logger.do_send(Oops::fatal(e));
-    }
+    let _bot = Bot::spawn(logger.clone(), &world);
+
+    world.do_send(StartListening);
+    debug!(logger, "Telling the world to start listening for messages");
 
     if sys.run() == 0 {
         Ok(())

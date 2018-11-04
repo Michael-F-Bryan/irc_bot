@@ -1,13 +1,19 @@
-use actix::dev::ToEnvelope;
+use actix::actors::signal::Signal;
+use actix::msgs::StopArbiter;
 use actix::{
-    Actor, Addr, AsyncContext, Context, Handler, Message, Recipient,
+    Actor, Addr, Arbiter, AsyncContext, Context, Handler, Message,
     StreamHandler, System,
 };
 use crate::channel::Channel;
-use crate::utils::{MessageBox, Panic};
-use irc::client::Client;
+use crate::messages::{
+    Connected, Identify, Join, NotRegistered, Panic, PrivateMessage, Quit,
+    RawMessage, Registration, StartListening,
+};
+use crate::utils::MessageBox;
+use irc::client::prelude::{Client, ClientExt};
 use irc::error::IrcError;
 use irc::proto::message::Message as IrcMessage;
+use irc::proto::{Command, Response};
 use slog::{Discard, Logger};
 use std::collections::HashMap;
 use std::fmt::{self, Debug, Formatter};
@@ -18,6 +24,7 @@ pub struct World<C> {
     channels: HashMap<String, Addr<Channel>>,
     client: C,
     logger: Logger,
+    message_count: usize,
 }
 
 impl<C> World<C> {
@@ -31,15 +38,16 @@ impl<C> World<C> {
             logger,
             hooks: MessageBox::new(),
             channels: HashMap::new(),
+            message_count: 0,
         }
     }
 
     fn publish<M>(&mut self, msg: M)
     where
-        M: BotMessage + Message + Clone + Send + 'static,
+        M: Message + Clone + Send + 'static,
         M::Result: Send,
     {
-        self.hooks.send(msg);
+        self.hooks.send(msg)
     }
 }
 
@@ -47,17 +55,25 @@ impl<C: 'static> Actor for World<C> {
     type Context = Context<World<C>>;
 }
 
-/// A marker trait for messages you can subscribe to.
-pub trait BotMessage {}
+impl<C: Debug> Debug for World<C> {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let World {
+            ref client,
+            ref channels,
+            ref logger,
+            ref hooks,
+            message_count,
+        } = *self;
 
-/// Tell the IRC client to start listening for messages.
-///
-/// # Panic
-///
-/// This message can only be sent once. Telling the [`World`] to
-/// [`StartListening`] multiple times will probably result in a panic.
-#[derive(Debug, Copy, Clone, Message)]
-pub struct StartListening;
+        f.debug_struct("World")
+            .field("client", client)
+            .field("hooks", &format_args!("({} listeners)", hooks.len()))
+            .field("channels", channels)
+            .field("logger", logger)
+            .field("message_count", &message_count)
+            .finish()
+    }
+}
 
 impl<C: Client + 'static> Handler<StartListening> for World<C> {
     type Result = ();
@@ -76,115 +92,84 @@ impl<C: 'static> StreamHandler<IrcMessage, IrcError> for World<C> {
 impl<C: 'static> Handler<RawMessage> for World<C> {
     type Result = ();
 
-    fn handle(&mut self, item: RawMessage, _ctx: &mut Self::Context) {
-        self.publish(item);
+    fn handle(&mut self, msg: RawMessage, _ctx: &mut Self::Context) {
+        debug!(self.logger, "Received a message";
+            "prefix" => msg.0.prefix.as_ref(),
+            "command" => format_args!("{:?}", msg.0.command));
+
+        if self.message_count == 0 {
+            debug!(self.logger, "Notifying listeners that we've connected");
+            self.publish(Connected);
+        }
+        self.message_count += 1;
+
+        if let Command::Response(
+            Response::ERR_NOTREGISTERED,
+            ref args,
+            ref suffix,
+        ) = msg.0.command
+        {
+            self.publish(NotRegistered {
+                args: args.clone(),
+                suffix: suffix.clone(),
+            });
+        }
+
+        self.publish(msg);
     }
 }
 
-/// Subscribe to a particular message.
-#[derive(Clone, Message)]
-pub struct Register<M>
-where
-    M: Message + Send + 'static,
-    M::Result: Send,
-{
-    recipient: Recipient<M>,
-}
-
-impl<M> Register<M>
-where
-    M: Message + Send + 'static,
-    M::Result: Send,
-{
-    pub fn new(recipient: Recipient<M>) -> Register<M> {
-        Register { recipient }
-    }
-
-    pub fn for_actor<A>(addr: Addr<A>) -> Register<M>
-    where
-        A: Actor + Handler<M>,
-        A::Context: ToEnvelope<A, M>,
-    {
-        Register::new(addr.recipient())
-    }
-}
-
-impl<M, C> Handler<Register<M>> for World<C>
-where
-    M: BotMessage + Message + Clone + Send + 'static,
-    M::Result: Send,
-    C: 'static,
-{
+impl<C: Client + 'static> Handler<Quit> for World<C> {
     type Result = ();
 
-    fn handle(&mut self, msg: Register<M>, _ctx: &mut Self::Context) {
-        self.hooks.register(msg.recipient);
+    fn handle(&mut self, msg: Quit, _ctx: &mut Self::Context) {
+        info!(self.logger, "Received a request to exit");
+
+        if let Err(e) = self.client.send_quit(msg.msg) {
+            error!(self.logger, "Unable to quit"; "error" => e.to_string());
+        }
+
+        System::current().stop();
     }
 }
 
-/// Ask to stop receiving a particular kind of message.
-#[derive(Clone, Message)]
-pub struct Unregister<M>
-where
-    M: Message + Send + 'static,
-    M::Result: Send,
-{
-    recipient: Recipient<M>,
-}
-
-impl<M> Unregister<M>
-where
-    M: Message + Send + 'static,
-    M::Result: Send,
-{
-    pub fn new(recipient: Recipient<M>) -> Unregister<M> {
-        Unregister { recipient }
-    }
-
-    pub fn for_actor<A>(addr: Addr<A>) -> Unregister<M>
-    where
-        A: Actor + Handler<M>,
-        A::Context: ToEnvelope<A, M>,
-    {
-        Unregister::new(addr.recipient())
-    }
-}
-
-impl<M, C> Handler<Unregister<M>> for World<C>
-where
-    M: BotMessage + Message + Clone + Send + 'static,
-    M::Result: Send,
-    C: 'static,
-{
+impl<C: Client + 'static> Handler<PrivateMessage> for World<C> {
     type Result = ();
 
-    fn handle(&mut self, msg: Unregister<M>, _ctx: &mut Self::Context) {
-        self.hooks.unregister(&msg.recipient);
+    fn handle(&mut self, msg: PrivateMessage, _ctx: &mut Self::Context) {
+        debug!(self.logger, "Sending a private message";
+            "recipient" => &msg.to,
+            "content" => &msg.content);
+
+        if let Err(e) = self.client.send_privmsg(msg.to, msg.content) {
+            error!(self.logger, "Unable to send a private message";
+                "error" => e.to_string());
+        }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Message)]
-pub struct RawMessage(pub IrcMessage);
+impl<C: Client + 'static> Handler<Join> for World<C> {
+    type Result = ();
 
-impl BotMessage for RawMessage {}
+    fn handle(&mut self, msg: Join, _ctx: &mut Self::Context) {
+        if let Err(e) = self.client.send_join(&msg.channels) {
+            error!(self.logger, "Unable to join";
+                "error" => e.to_string(),
+                "channels" => msg.channels);
+        }
+    }
+}
 
-impl<C: Debug> Debug for World<C> {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let World {
-            ref client,
-            ref channels,
-            ref logger,
-            hooks: _,
-        } = *self;
+impl<C: Client + 'static> Handler<Identify> for World<C> {
+    type Result = ();
 
-        let hooks = "/* elided */";
+    fn handle(&mut self, _msg: Identify, _ctx: &mut Self::Context) {
+        info!(self.logger, "Sending identification");
 
-        f.debug_struct("World")
-            .field("client", &client)
-            .field("hooks", &hooks)
-            .field("channels", &channels)
-            .field("logger", &logger)
-            .finish()
+        if let Err(e) = self.client.identify() {
+            error!(self.logger, "Unable to identify";
+                "error" => e.to_string());
+        }
     }
 }
 
@@ -211,10 +196,44 @@ impl<C: 'static> Handler<Panic> for World<C> {
             "column" => column,
             "thread" => thread,
             "backtrace" => bt);
+        Arbiter::current().do_send(StopArbiter(1));
+    }
+}
+
+impl<C: Client + 'static> Handler<Signal> for World<C> {
+    type Result = ();
+
+    fn handle(&mut self, msg: Signal, _ctx: &mut Self::Context) {
+        info!(self.logger, "Received a signal"; 
+            "signal" => format_args!("{:?}", msg.0));
+
+        if let Err(e) = self.client.send_quit("Leaving...") {
+            error!(self.logger, "Encountered an error while trying to quit gracefully";
+                "error" => e.to_string());
+        }
 
         System::current().stop();
     }
 }
+
+macro_rules! allow_registration {
+    ($message_type:ty) => {
+        impl<C: 'static> Handler<Registration<$message_type>> for World<C> {
+            type Result = ();
+
+            fn handle(
+                &mut self,
+                msg: Registration<$message_type>,
+                _ctx: &mut Self::Context,
+            ) {
+                msg.apply(&mut self.hooks);
+            }
+        }
+    };
+}
+
+allow_registration!(RawMessage);
+allow_registration!(Connected);
 
 #[cfg(test)]
 mod tests {
@@ -230,8 +249,6 @@ mod tests {
     #[derive(Debug, Clone, Message)]
     struct DummyMessage;
 
-    impl BotMessage for DummyMessage {}
-
     impl<C: 'static> Handler<DummyMessage> for World<C> {
         type Result = ();
 
@@ -242,6 +259,18 @@ mod tests {
                     .for_each(|_| future::ok(()))
                     .map_err(|e| panic!("{}", e)),
             );
+        }
+    }
+
+    impl<C: 'static> Handler<Registration<DummyMessage>> for World<C> {
+        type Result = ();
+
+        fn handle(
+            &mut self,
+            msg: Registration<DummyMessage>,
+            _ctx: &mut Self::Context,
+        ) {
+            msg.apply(&mut self.hooks);
         }
     }
 
@@ -293,8 +322,8 @@ mod tests {
             .start();
 
         // tell the world we want to register for DummyMessages
-        let msg: Register<DummyMessage> =
-            Register::new(mock.clone().recipient());
+        let msg: Registration<DummyMessage> =
+            Registration::register(mock.clone().recipient());
         sys.block_on(world.send(msg)).unwrap();
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -312,7 +341,7 @@ mod tests {
         let world = World::new("asd").start();
         let (sub, got) = Sub::<RawMessage>::new();
 
-        sys.block_on(world.send(Register::for_actor(sub.clone())))
+        sys.block_on(world.send(Registration::for_actor(sub.clone(), true)))
             .unwrap();
 
         let msg = RawMessage(IrcMessage::from(Command::INFO(None)));
