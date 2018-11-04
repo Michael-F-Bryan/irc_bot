@@ -1,14 +1,14 @@
 use actix::dev::ToEnvelope;
 use actix::{
     Actor, Addr, AsyncContext, Context, Handler, Message, Recipient,
-    StreamHandler,
+    StreamHandler, System,
 };
 use crate::channel::Channel;
-use crate::utils::MessageBox;
-use futures::Stream;
+use crate::utils::{MessageBox, Panic};
 use irc::client::Client;
 use irc::error::IrcError;
 use irc::proto::message::Message as IrcMessage;
+use slog::{Discard, Logger};
 use std::collections::HashMap;
 use std::fmt::{self, Debug, Formatter};
 
@@ -17,12 +17,18 @@ pub struct World<C> {
     hooks: MessageBox,
     channels: HashMap<String, Addr<Channel>>,
     client: C,
+    logger: Logger,
 }
 
 impl<C> World<C> {
     pub fn new(client: C) -> World<C> {
+        World::new_with_logger(client, Logger::root(Discard, o!()))
+    }
+
+    pub fn new_with_logger(client: C, logger: Logger) -> World<C> {
         World {
             client,
+            logger,
             hooks: MessageBox::new(),
             channels: HashMap::new(),
         }
@@ -45,6 +51,11 @@ impl<C: 'static> Actor for World<C> {
 pub trait BotMessage {}
 
 /// Tell the IRC client to start listening for messages.
+///
+/// # Panic
+///
+/// This message can only be sent once. Telling the [`World`] to
+/// [`StartListening`] multiple times will probably result in a panic.
 #[derive(Debug, Copy, Clone, Message)]
 pub struct StartListening;
 
@@ -100,7 +111,7 @@ where
 
 impl<M, C> Handler<Register<M>> for World<C>
 where
-    M: Message + Clone + Send + 'static,
+    M: BotMessage + Message + Clone + Send + 'static,
     M::Result: Send,
     C: 'static,
 {
@@ -108,6 +119,47 @@ where
 
     fn handle(&mut self, msg: Register<M>, _ctx: &mut Self::Context) {
         self.hooks.register(msg.recipient);
+    }
+}
+
+/// Ask to stop receiving a particular kind of message.
+#[derive(Clone, Message)]
+pub struct Unregister<M>
+where
+    M: Message + Send + 'static,
+    M::Result: Send,
+{
+    recipient: Recipient<M>,
+}
+
+impl<M> Unregister<M>
+where
+    M: Message + Send + 'static,
+    M::Result: Send,
+{
+    pub fn new(recipient: Recipient<M>) -> Unregister<M> {
+        Unregister { recipient }
+    }
+
+    pub fn for_actor<A>(addr: Addr<A>) -> Unregister<M>
+    where
+        A: Actor + Handler<M>,
+        A::Context: ToEnvelope<A, M>,
+    {
+        Unregister::new(addr.recipient())
+    }
+}
+
+impl<M, C> Handler<Unregister<M>> for World<C>
+where
+    M: BotMessage + Message + Clone + Send + 'static,
+    M::Result: Send,
+    C: 'static,
+{
+    type Result = ();
+
+    fn handle(&mut self, msg: Unregister<M>, _ctx: &mut Self::Context) {
+        self.hooks.unregister(&msg.recipient);
     }
 }
 
@@ -121,6 +173,7 @@ impl<C: Debug> Debug for World<C> {
         let World {
             ref client,
             ref channels,
+            ref logger,
             hooks: _,
         } = *self;
 
@@ -130,7 +183,36 @@ impl<C: Debug> Debug for World<C> {
             .field("client", &client)
             .field("hooks", &hooks)
             .field("channels", &channels)
+            .field("logger", &logger)
             .finish()
+    }
+}
+
+impl<C: 'static> Handler<Panic> for World<C> {
+    type Result = ();
+
+    fn handle(&mut self, msg: Panic, _ctx: &mut Self::Context) {
+        let Panic {
+            message,
+            file,
+            line,
+            column,
+            thread,
+            backtrace,
+        } = msg;
+
+        let bt = backtrace.to_string();
+        let bt = if bt.is_empty() { None } else { Some(bt) };
+
+        error!(self.logger, "A thread panicked";
+            "message" => message,
+            "file" => file,
+            "line" => line,
+            "column" => column,
+            "thread" => thread,
+            "backtrace" => bt);
+
+        System::current().stop();
     }
 }
 
@@ -143,10 +225,12 @@ mod tests {
     use futures::Stream;
     use irc::proto::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, MutexGuard};
+    use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Clone, Message)]
     struct DummyMessage;
+
+    impl BotMessage for DummyMessage {}
 
     impl<C: 'static> Handler<DummyMessage> for World<C> {
         type Result = ();
